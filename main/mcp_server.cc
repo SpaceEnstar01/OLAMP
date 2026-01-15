@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <esp_pthread.h>
+#include <cmath>  // 添加这一行，用于 std::isnan()
 
 #include "application.h"
 #include "display.h"
@@ -102,6 +103,71 @@ void McpServer::AddCommonTools() {
                 return camera->Explain(question);
             });
     }
+
+// add by zexuan  
+
+
+    auto servo = board.GetServo();
+    if (servo) {
+        AddTool("self.servo.rotate",
+            "Rotate the servo motor. Use this tool when user asks to turn left/right.\n"
+            "Args:\n"
+            "  `direction`: 'left' for counterclockwise, 'right' for clockwise\n"
+            "  `angle`: rotation angle in degrees (default: 90)\n"
+            "Return:\n"
+            "  JSON with success status and position information.",
+
+            PropertyList({
+                Property("direction", kPropertyTypeString),
+                Property("angle", kPropertyTypeInteger, 90, 0, 180)  // 默认值90，范围0-180
+            }),
+
+            [servo](const PropertyList& properties) -> ReturnValue {
+                if (!servo->IsInitialized()) {
+                    return "{\"success\": false, \"message\": \"Servo not initialized\"}";
+                }
+                
+                auto direction = properties["direction"].value<std::string>();
+                int angle = properties["angle"].value<int>();  // 直接使用，如果没有传入会使用默认值90
+
+
+                
+                float current_pos = servo->GetPosition();
+                if (std::isnan(current_pos)) {
+                    return "{\"success\": false, \"message\": \"Failed to read current position\"}";
+                }
+                
+                float target_pos = current_pos;
+                if (direction == "left") {
+                    target_pos = current_pos - angle;
+                } else if (direction == "right") {
+                    target_pos = current_pos + angle;
+                } else {
+                    return "{\"success\": false, \"message\": \"Invalid direction, use 'left' or 'right'\"}";
+                }
+                
+                // Handle angle boundary (-180 to 180)
+                while (target_pos > 180.0f) target_pos -= 360.0f;
+                while (target_pos < -180.0f) target_pos += 360.0f;
+                
+                if (!servo->MoveTo(target_pos)) {
+                    return "{\"success\": false, \"message\": \"Failed to move servo\"}";
+                }
+                
+                char result[256];
+                snprintf(result, sizeof(result), 
+                    "{\"success\": true, \"current_position\": %.1f, \"target_position\": %.1f, \"direction\": \"%s\", \"angle\": %d}",
+                    current_pos, target_pos, direction.c_str(), angle);
+                return std::string(result);
+            });
+    }
+
+
+
+
+
+// add by zexuan  
+
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());

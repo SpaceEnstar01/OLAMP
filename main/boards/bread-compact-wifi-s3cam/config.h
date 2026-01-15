@@ -302,7 +302,14 @@
 #endif
 
 
-// A MCP Test: Control a lamp
-#define LAMP_GPIO GPIO_NUM_14
+ 
+
+
+// Servo UART Configuration
+#define SERVO_UART_NUM      UART_NUM_1
+#define SERVO_TX_PIN        GPIO_NUM_14
+#define SERVO_RX_PIN        GPIO_NUM_3
+#define SERVO_BAUD_RATE     1000000
+#define SERVO_ID            1
 
 #endif // _BOARD_CONFIG_H_

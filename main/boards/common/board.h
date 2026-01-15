@@ -11,10 +11,12 @@
 #include "led/led.h"
 #include "backlight.h"
 #include "camera.h"
+#include "servo/servo.h"
 
 void* create_board();
 class AudioCodec;
 class Display;
+class Servo;
 class Board {
 private:
     Board(const Board&) = delete; // 禁用拷贝构造函数
@@ -42,6 +44,7 @@ public:
     virtual bool GetTemperature(float& esp32temp);
     virtual Display* GetDisplay();
     virtual Camera* GetCamera();
+    virtual Servo* GetServo();
     virtual NetworkInterface* GetNetwork() = 0;
     virtual void StartNetwork() = 0;
     virtual const char* GetNetworkStateIcon() = 0;

@@ -14,6 +14,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/display.cc"
             "display/lcd_display.cc"
             "display/oled_display.cc"
+            "servo/servo.cc"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
@@ -25,6 +26,11 @@ set(SOURCES "audio/audio_codec.cc"
             "device_state_event.cc"
             "main.cc"
             )
+
+# 添加 st_servo 库的源文件 add by zexuan 
+
+file(GLOB SERVO_ST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/servo/st_servo/*.cpp")
+list(APPEND SOURCES ${SERVO_ST_SOURCES})
 
 set(INCLUDE_DIRS "." "display" "audio" "protocols")
 
@@ -216,6 +222,8 @@ elseif(CONFIG_BOARD_TYPE_LABPLUS_LEDONG_V2)
     set(BOARD_TYPE "labplus-ledong-v2") 
 elseif(CONFIG_BOARD_TYPE_SURFER_C3_1_14TFT)
     set(BOARD_TYPE "surfer-c3-1.14tft")
+elseif(CONFIG_BOARD_TYPE_HIWONDER_AIMODULE)
+    set(BOARD_TYPE "hiwonder-aimodule")
 endif()
 file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_TYPE}/*.cc

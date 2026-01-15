@@ -9,6 +9,10 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "esp32_camera.h"
+#include "servo/servo.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -70,7 +74,7 @@ private:
     Button boot_button_;
     LcdDisplay* display_;
      Esp32Camera* camera_;
-
+    Servo* servo_;
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
         buscfg.mosi_io_num = DISPLAY_MOSI_PIN;
@@ -178,6 +182,50 @@ private:
         });
     }
 
+// add by zexuan 
+
+void InitializeServo() {
+    servo_ = new Servo();
+    if (!servo_->Init(SERVO_UART_NUM, SERVO_TX_PIN, SERVO_RX_PIN, SERVO_BAUD_RATE, SERVO_ID)) {
+        ESP_LOGE(TAG, "Failed to initialize servo");
+        delete servo_;
+        servo_ = nullptr;
+        return;
+    }
+    ESP_LOGI(TAG, "Servo initialized successfully");
+
+    // 创建测试任务：90度循环
+    // xTaskCreate([](void* arg) {
+    //     Servo* servo = static_cast<Servo*>(arg);
+    //     const int MOVEMENT_DELAY = 2000; // 2秒等待时间
+        
+    //     while (1) {
+    //         // 移动到 0 度
+    //         ESP_LOGI(TAG, "Moving servo to 0 degrees");
+    //         servo->MoveTo(0.0f);
+    //         vTaskDelay(pdMS_TO_TICKS(MOVEMENT_DELAY));
+            
+    //         // 读取当前位置
+    //         float pos = servo->GetPosition();
+    //         ESP_LOGI(TAG, "Current position: %.1f degrees", pos);
+            
+    //         // 移动到 90 度
+    //         ESP_LOGI(TAG, "Moving servo to 90 degrees");
+    //         servo->MoveTo(90.0f);
+    //         vTaskDelay(pdMS_TO_TICKS(MOVEMENT_DELAY));
+            
+    //         // 读取当前位置
+    //         pos = servo->GetPosition();
+    //         ESP_LOGI(TAG, "Current position: %.1f degrees", pos);
+    //     }
+    // }, "servo_test_task", 4096, servo_, 5, nullptr);
+}
+
+
+// add by zexuan 
+
+
+    
 public:
     CompactWifiBoardS3Cam() :
         boot_button_(BOOT_BUTTON_GPIO) {
@@ -185,6 +233,7 @@ public:
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeCamera();
+        InitializeServo();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
@@ -222,6 +271,11 @@ public:
     virtual Camera* GetCamera() override {
         return camera_;
     }
+
+    virtual Servo* GetServo() override {
+        return servo_;
+    }
+
 };
 
 DECLARE_BOARD(CompactWifiBoardS3Cam);
