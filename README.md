@@ -1,6 +1,6 @@
 # OLAMP (Open Lamp)
 
-A voice-controlled smart lamp/device based on ESP32, powered by AI and MCP protocol. Built on top of the [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) open-source project.
+A voice-controlled smart lamp/device based on ESP32, powered by AI and MCP protocol. 
 
 ## Features
 
@@ -187,4 +187,8 @@ This project is built on top of the excellent [xiaozhi-esp32](https://github.com
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 一起让世界更美好
+
+
 
