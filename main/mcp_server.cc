@@ -14,6 +14,8 @@
 #include "application.h"
 #include "display.h"
 #include "board.h"
+#include "servo/servo_manager.h"
+#include "lamp_server/lamp_mcp_bridge.h"
 
 #define TAG "MCP"
 
@@ -104,70 +106,128 @@ void McpServer::AddCommonTools() {
             });
     }
 
-// add by zexuan  
+// add by zexuan
 
-
+    /* 暂时禁用：self.servo.rotate
     auto servo = board.GetServo();
     if (servo) {
-        AddTool("self.servo.rotate",
-            "Rotate the servo motor. Use this tool when user asks to turn left/right.\n"
-            "Args:\n"
-            "  `direction`: 'left' for counterclockwise, 'right' for clockwise\n"
-            "  `angle`: rotation angle in degrees (default: 90)\n"
-            "Return:\n"
-            "  JSON with success status and position information.",
-
-            PropertyList({
-                Property("direction", kPropertyTypeString),
-                Property("angle", kPropertyTypeInteger, 90, 0, 180)  // 默认值90，范围0-180
-            }),
-
-            [servo](const PropertyList& properties) -> ReturnValue {
-                if (!servo->IsInitialized()) {
-                    return "{\"success\": false, \"message\": \"Servo not initialized\"}";
-                }
-                
-                auto direction = properties["direction"].value<std::string>();
-                int angle = properties["angle"].value<int>();  // 直接使用，如果没有传入会使用默认值90
-
-
-                
-                float current_pos = servo->GetPosition();
-                if (std::isnan(current_pos)) {
-                    return "{\"success\": false, \"message\": \"Failed to read current position\"}";
-                }
-                
-                float target_pos = current_pos;
-                if (direction == "left") {
-                    target_pos = current_pos - angle;
-                } else if (direction == "right") {
-                    target_pos = current_pos + angle;
-                } else {
-                    return "{\"success\": false, \"message\": \"Invalid direction, use 'left' or 'right'\"}";
-                }
-                
-                // Handle angle boundary (-180 to 180)
-                while (target_pos > 180.0f) target_pos -= 360.0f;
-                while (target_pos < -180.0f) target_pos += 360.0f;
-                
-                if (!servo->MoveTo(target_pos)) {
-                    return "{\"success\": false, \"message\": \"Failed to move servo\"}";
-                }
-                
-                char result[256];
-                snprintf(result, sizeof(result), 
-                    "{\"success\": true, \"current_position\": %.1f, \"target_position\": %.1f, \"direction\": \"%s\", \"angle\": %d}",
-                    current_pos, target_pos, direction.c_str(), angle);
-                return std::string(result);
-            });
+        AddTool("self.servo.rotate", ...);
     }
+    */
 
+// add by zexuan ,2026-03-16 , servos openclaw 舵机控制 --- start
+    /* 暂时禁用：self.lamp.set_angles
+    AddTool("self.lamp.set_angles", ...);
+    */
 
+    AddTool("self.lamp.joint2.relative_move",
+        "Relative move for lamp joint2(base_pitch/height), e.g. raise/lower height.\n"
+        "Args:\n"
+        "  delta_deg: signed delta in degrees, +up / -down.\n"
+        "  speed_deg_per_s: optional speed in deg/s, default 12.\n",
+        PropertyList({
+            Property("delta_deg", kPropertyTypeInteger, 10, -60, 60),
+            Property("speed_deg_per_s", kPropertyTypeInteger, 12, 1, 90)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            int delta = properties["delta_deg"].value<int>();
+            int speed = properties["speed_deg_per_s"].value<int>();
+            bool ok = LampMoveJoint2Relative(static_cast<float>(delta), static_cast<float>(speed));
+            if (!ok) {
+                return std::string("{\"success\":false,\"message\":\"LampMoveJoint2Relative failed\"}");
+            }
+            return std::string("{\"success\":true}");
+        });
+
+    /* 暂时注释：关节1/5
+    AddTool("self.lamp.joint1.relative_move",
+        "Relative move for lamp joint1(base_yaw), e.g. left/right a little.\n"
+        "Args:\n"
+        "  delta_deg: signed delta in degrees, +right / -left.\n"
+        "  speed_deg_per_s: optional speed in deg/s, default 15.\n",
+        PropertyList({
+            Property("delta_deg", kPropertyTypeInteger, 10, -90, 90),
+            Property("speed_deg_per_s", kPropertyTypeInteger, 15, 1, 90)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            int delta = properties["delta_deg"].value<int>();
+            int speed = properties["speed_deg_per_s"].value<int>();
+            bool ok = LampMoveJoint1Relative(static_cast<float>(delta), static_cast<float>(speed));
+            if (!ok) {
+                return std::string("{\"success\":false,\"message\":\"LampMoveJoint1Relative failed\"}");
+            }
+            return std::string("{\"success\":true}");
+        });
+
+    AddTool("self.lamp.joint5.relative_move",
+        "Relative move for lamp joint5(wrist_pitch), e.g. raise/lower a little.\n"
+        "Args:\n"
+        "  delta_deg: signed delta in degrees, +up / -down.\n"
+        "  speed_deg_per_s: optional speed in deg/s, default 10.\n",
+        PropertyList({
+            Property("delta_deg", kPropertyTypeInteger, 10, -90, 90),
+            Property("speed_deg_per_s", kPropertyTypeInteger, 10, 1, 60)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            int delta = properties["delta_deg"].value<int>();
+            int speed = properties["speed_deg_per_s"].value<int>();
+            bool ok = LampMoveJoint5Relative(static_cast<float>(delta), static_cast<float>(speed));
+            if (!ok) {
+                return std::string("{\"success\":false,\"message\":\"LampMoveJoint5Relative failed\"}");
+            }
+            return std::string("{\"success\":true}");
+        });
+    */
+// add by zexuan 2026-03-16 , servos openclaw 舵机控制 ----END
 
 
 
 // add by zexuan  
 
+    // ---- Washing program execution tool (controls robot arm via ServoManager) ----
+    // NOTE: Always register (no IsInitialized guard), because AddCommonTools()
+    //       runs BEFORE ServoManager::Init(). Callback checks at call time.
+    AddTool("self.washing.execute_program",
+        "Execute a washing program by controlling the washing machine's robot arm.\n"
+        "Call this tool IMMEDIATELY when the user confirms starting a washing program.\n"
+        "Available program values:\n"
+        "  - 'quick_wash': 快速洗 program\n"
+        "Args:\n"
+        "  `program`: The washing program to execute (e.g. 'quick_wash')\n"
+        "Return:\n"
+        "  JSON with success status and message.",
+        PropertyList({
+            Property("program", kPropertyTypeString)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& mgr = ServoManager::GetInstance();
+            if (!mgr.IsInitialized()) {
+                return std::string("{\"success\":false,\"message\":\"Servo system not initialized\"}");
+            }
+            if (mgr.IsPlaying()) {
+                return std::string("{\"success\":false,\"message\":\"Another program is already running\"}");
+            }
+
+            auto program = properties["program"].value<std::string>();
+
+            // Map washing program name → actual servo action
+            const char* real_action = nullptr;
+            if (program == "quick_wash") {
+                real_action = "smile";  // motion data for quick wash
+            }
+            // Add new programs here:
+            // if (program == "standard_wash") real_action = "standard";
+            // if (program == "gentle_wash")   real_action = "gentle";
+
+            if (!real_action) {
+                return std::string("{\"success\":false,\"message\":\"Unknown program: ") + program + "\"}";
+            }
+
+            if (mgr.PlayAction(real_action)) {
+                return std::string("{\"success\":true,\"message\":\"Program started: ") + program + "\"}";
+            }
+            return std::string("{\"success\":false,\"message\":\"Failed to start program\"}");
+        });
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());

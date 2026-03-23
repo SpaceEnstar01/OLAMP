@@ -153,14 +153,24 @@ void AudioService::Stop() {
 
 bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples) {
     if (!codec_->input_enabled()) {
+        ESP_LOGI(TAG, "ReadAudioData: Input was disabled, enabling...");
         esp_timer_stop(audio_power_timer_);
         esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
         codec_->EnableInput(true);
     }
 
+    static int read_attempts = 0;
+    static int read_failures = 0;
+    read_attempts++;
+
     if (codec_->input_sample_rate() != sample_rate) {
         data.resize(samples * codec_->input_sample_rate() / sample_rate * codec_->input_channels());
         if (!codec_->InputData(data)) {
+            read_failures++;
+            if (read_failures % 50 == 0) {
+                ESP_LOGW(TAG, "ReadAudioData: InputData() failed (failures=%d/%d, rate mismatch)", 
+                         read_failures, read_attempts);
+            }
             return false;
         }
         if (codec_->input_channels() == 2) {
@@ -187,8 +197,26 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
     } else {
         data.resize(samples * codec_->input_channels());
         if (!codec_->InputData(data)) {
+            read_failures++;
+            if (read_failures % 50 == 0) {
+                ESP_LOGW(TAG, "ReadAudioData: InputData() failed (failures=%d/%d, same rate)", 
+                         read_failures, read_attempts);
+            }
             return false;
         }
+    }
+
+    // 检查数据是否有效（每100次打印一次统计）
+    static int success_count = 0;
+    success_count++;
+    if (success_count % 100 == 0) {
+        int max_abs = 0;
+        for (size_t i = 0; i < data.size() && i < 100; i++) {
+            int abs_val = abs(data[i]);
+            if (abs_val > max_abs) max_abs = abs_val;
+        }
+        ESP_LOGI(TAG, "ReadAudioData: success_count=%d, data_size=%d, max_abs=%d, failures=%d/%d",
+                 success_count, (int)data.size(), max_abs, read_failures, read_attempts);
     }
 
     /* Update the last input time */
@@ -252,6 +280,19 @@ void AudioService::AudioInputTask() {
                 if (ReadAudioData(data, 16000, samples)) {
                     wake_word_->Feed(data);
                     continue;
+                } else {
+                    static int wake_word_fail_count = 0;
+                    wake_word_fail_count++;
+                    if (wake_word_fail_count % 100 == 0) {
+                        ESP_LOGW(TAG, "AudioInputTask: WakeWord ReadAudioData failed (count=%d, samples=%d)", 
+                                 wake_word_fail_count, samples);
+                    }
+                }
+            } else {
+                static int wake_word_zero_count = 0;
+                wake_word_zero_count++;
+                if (wake_word_zero_count % 1000 == 0) {
+                    ESP_LOGD(TAG, "AudioInputTask: WakeWord GetFeedSize=0 (count=%d)", wake_word_zero_count);
                 }
             }
         }
@@ -264,6 +305,19 @@ void AudioService::AudioInputTask() {
                 if (ReadAudioData(data, 16000, samples)) {
                     audio_processor_->Feed(std::move(data));
                     continue;
+                } else {
+                    static int processor_fail_count = 0;
+                    processor_fail_count++;
+                    if (processor_fail_count % 100 == 0) {
+                        ESP_LOGW(TAG, "AudioInputTask: Processor ReadAudioData failed (count=%d, samples=%d)", 
+                                 processor_fail_count, samples);
+                    }
+                }
+            } else {
+                static int processor_zero_count = 0;
+                processor_zero_count++;
+                if (processor_zero_count % 1000 == 0) {
+                    ESP_LOGD(TAG, "AudioInputTask: Processor GetFeedSize=0 (count=%d)", processor_zero_count);
                 }
             }
         }

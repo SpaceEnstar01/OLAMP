@@ -131,3 +131,25 @@ config CUSTOM_WAKE_WORD_DISPLAY
 - [自定义唤醒词教程](https://pcn7cs20v8cr.feishu.cn/wiki/CpQjwQsCJiQSWSkYEvrcxcbVnwh)
 - [启英泰伦语音AI平台](https://platform.chipintelli.com/)
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

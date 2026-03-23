@@ -142,6 +142,8 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
     std_cfg.gpio_cfg.din = mic_din;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle_, &std_cfg));
     ESP_LOGI(TAG, "Simplex channels created");
+    ESP_LOGI(TAG, "MIC I2S Config: port=1, sample_rate=%d, bclk=GPIO%d, ws=GPIO%d, din=GPIO%d, slot_mask=LEFT, bit_width=32",
+             input_sample_rate_, mic_sck, mic_ws, mic_din);
 }
 
 NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sample_rate, gpio_num_t spk_bclk, gpio_num_t spk_ws, gpio_num_t spk_dout, i2s_std_slot_mask_t spk_slot_mask, gpio_num_t mic_sck, gpio_num_t mic_ws, gpio_num_t mic_din, i2s_std_slot_mask_t mic_slot_mask){
@@ -305,17 +307,48 @@ int NoAudioCodec::Read(int16_t* dest, int samples) {
     size_t bytes_read;
 
     std::vector<int32_t> bit32_buffer(samples);
-    if (i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t), &bytes_read, portMAX_DELAY) != ESP_OK) {
-        ESP_LOGE(TAG, "Read Failed!");
+    esp_err_t err = i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t), &bytes_read, portMAX_DELAY);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Read Failed! err=0x%x (%s)", err, esp_err_to_name(err));
         return 0;
     }
 
-    samples = bytes_read / sizeof(int32_t);
-    for (int i = 0; i < samples; i++) {
+    int actual_samples = bytes_read / sizeof(int32_t);
+    
+    // 统计调试信息（可选，默认关闭详细日志）
+    static int read_count = 0;
+    static int zero_count = 0;
+    read_count++;
+    
+    // 检查是否有非零数据
+    bool has_nonzero = false;
+    int max_abs = 0;
+    for (int i = 0; i < actual_samples; i++) {
         int32_t value = bit32_buffer[i] >> 12;
-        dest[i] = (value > INT16_MAX) ? INT16_MAX : (value < -INT16_MAX) ? -INT16_MAX : (int16_t)value;
+        int16_t sample = (value > INT16_MAX) ? INT16_MAX : (value < -INT16_MAX) ? -INT16_MAX : (int16_t)value;
+        dest[i] = sample;
+        int abs_val = abs(sample);
+        if (abs_val > max_abs) max_abs = abs_val;
+        if (abs_val > 100) has_nonzero = true;  // 阈值100，过滤噪声
+        if (abs_val < 10) zero_count++;
     }
-    return samples;
+    
+    // 每100次读取或检测到数据时打印（已注释，避免日志过多）
+    // if (read_count % 100 == 0 || has_nonzero) {
+    //     ESP_LOGI(TAG, "Read[%d]: bytes=%d, samples=%d/%d, max_abs=%d, zeros=%d/%d, has_data=%d",
+    //              read_count, (int)bytes_read, actual_samples, samples, max_abs, zero_count, actual_samples, has_nonzero);
+    //     if (has_nonzero && actual_samples > 0) {
+    //         // 打印前8个样本
+    //         int log_n = actual_samples < 8 ? actual_samples : 8;
+    //         ESP_LOGI(TAG, "  First %d samples: ", log_n);
+    //         for (int i = 0; i < log_n; i++) {
+    //             ESP_LOGI(TAG, "    [%d]=%d (raw32=0x%08x)", i, dest[i], (unsigned int)bit32_buffer[i]);
+    //         }
+    //     }
+    //     zero_count = 0;
+    // }
+    
+    return actual_samples;
 }
 
 int NoAudioCodecSimplexPdm::Read(int16_t* dest, int samples) {

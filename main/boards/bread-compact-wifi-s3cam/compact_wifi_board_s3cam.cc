@@ -6,7 +6,7 @@
 #include "button.h"
 #include "config.h"
 #include "mcp_server.h"
-#include "lamp_controller.h"
+#include "led/lamp_led.h"
 #include "led/single_led.h"
 #include "esp32_camera.h"
 #include "servo/servo.h"
@@ -104,7 +104,8 @@ private:
         // 初始化液晶屏驱动芯片
         ESP_LOGD(TAG, "Install LCD driver");
         esp_lcd_panel_dev_config_t panel_config = {};
-        panel_config.reset_gpio_num = DISPLAY_RST_PIN;
+        // 暂时禁用RST引脚（GPIO 21）用于台灯控制，未来接LCD时可改回 DISPLAY_RST_PIN
+        panel_config.reset_gpio_num = GPIO_NUM_NC;
         panel_config.rgb_ele_order = DISPLAY_RGB_ORDER;
         panel_config.bits_per_pixel = 16;
 #if defined(LCD_TYPE_ILI9341_SERIAL)
@@ -182,6 +183,11 @@ private:
         });
     }
 
+    // 物联网初始化，添加台灯PWM控制
+    void InitializeTools() {
+        static LampLed lamp_led(GPIO_NUM_21);  // 使用GPIO 21（原LCD RST引脚，已放弃LCD）
+    }
+
 // add by zexuan 
 
 void InitializeServo() {
@@ -192,7 +198,6 @@ void InitializeServo() {
         servo_ = nullptr;
         return;
     }
-    ESP_LOGI(TAG, "Servo initialized successfully");
 
     // 创建测试任务：90度循环
     // xTaskCreate([](void* arg) {
@@ -230,10 +235,12 @@ public:
     CompactWifiBoardS3Cam() :
         boot_button_(BOOT_BUTTON_GPIO) {
         InitializeSpi();
-        InitializeLcdDisplay();
+        InitializeLcdDisplay();  // LCD初始化（已禁用GPIO 21）
         InitializeButtons();
         InitializeCamera();
         InitializeServo();
+        InitializeTools();  // 初始化台灯控制（使用GPIO 21）
+
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }

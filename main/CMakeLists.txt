@@ -11,10 +11,14 @@ set(SOURCES "audio/audio_codec.cc"
             "led/single_led.cc"
             "led/circular_strip.cc"
             "led/gpio_led.cc"
+            "led/lamp_led.cc"
+            "led/test_lamp_led.cc"
             "display/display.cc"
             "display/lcd_display.cc"
             "display/oled_display.cc"
             "servo/servo.cc"
+            "servo/multi_servo.cc"
+            "servo/servo_manager.cc"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
@@ -32,7 +36,11 @@ set(SOURCES "audio/audio_codec.cc"
 file(GLOB SERVO_ST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/servo/st_servo/*.cpp")
 list(APPEND SOURCES ${SERVO_ST_SOURCES})
 
-set(INCLUDE_DIRS "." "display" "audio" "protocols")
+# Add lamp_server sources (high-level lamp/servo logic)
+file(GLOB LAMP_SERVER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/lamp_server/*.cc")
+list(APPEND SOURCES ${LAMP_SERVER_SOURCES})
+
+set(INCLUDE_DIRS "." "display" "audio" "protocols" "servo" "lamp_server")
 
 # 添加板级公共文件
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)

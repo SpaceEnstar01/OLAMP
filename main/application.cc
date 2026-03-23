@@ -8,14 +8,19 @@
 #include "font_awesome_symbols.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
+#include "servo/servo_manager.h"
+#include "led/lamp_led.h"
+#include "lamp_server/lamp_mcp_bridge.h"
 
 #include <cstring>
+#include <algorithm>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 
 #define TAG "Application"
+static const char* kGreetingActionName = "say_hello";
 
 
 static const char* const STATE_STRINGS[] = {
@@ -359,24 +364,14 @@ void Application::Start() {
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
 
-    // Check for new firmware version or get the MQTT broker address
-    Ota ota;
-    CheckNewVersion(ota);
-
-    // Initialize the protocol
+    // Initialize the protocol (disable OTA-based version checking & config)
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
     // Add MCP common tools before initializing the protocol
     McpServer::GetInstance().AddCommonTools();
 
-    if (ota.HasMqttConfig()) {
+    // Always use MQTT protocol directly, without OTA config
         protocol_ = std::make_unique<MqttProtocol>();
-    } else if (ota.HasWebsocketConfig()) {
-        protocol_ = std::make_unique<WebsocketProtocol>();
-    } else {
-        ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
-        protocol_ = std::make_unique<MqttProtocol>();
-    }
 
     protocol_->OnNetworkError([this](const std::string& message) {
         last_error_message_ = message;
@@ -436,8 +431,129 @@ void Application::Start() {
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
-                ESP_LOGI(TAG, ">> %s", text->valuestring);
-                Schedule([this, display, message = std::string(text->valuestring)]() {
+                std::string message = text->valuestring;
+                ESP_LOGI(TAG, ">> %s", message.c_str());
+                std::string lower_message = message;
+                std::transform(lower_message.begin(), lower_message.end(), lower_message.begin(), ::tolower);
+                
+                // 关键词直接控制台灯（快速响应，无需LLM理解）
+                auto* lamp_led = GetLampLed();
+                ESP_LOGI(TAG, "GetLampLed() returned: %p", lamp_led);
+                if (lamp_led != nullptr) {
+                    ESP_LOGI(TAG, "LampLed instance found, checking keywords in message: %s", message.c_str());
+                    
+                    // 检测开灯关键词
+                    bool found_on = (lower_message.find("开灯") != std::string::npos || 
+                                     lower_message.find("亮灯") != std::string::npos ||
+                                     lower_message.find("打开台灯") != std::string::npos ||
+                                     lower_message.find("开台灯") != std::string::npos);
+                    bool found_off = (lower_message.find("关灯") != std::string::npos || 
+                                      lower_message.find("熄灯") != std::string::npos ||
+                                      lower_message.find("关闭台灯") != std::string::npos ||
+                                      lower_message.find("关台灯") != std::string::npos);
+                    
+                    if (found_on) {
+                        ESP_LOGI(TAG, "Keyword detected: turn on lamp");
+                        lamp_led->TurnOn(0);  // 立即切换，快速响应
+                    } else if (found_off) {
+                        ESP_LOGI(TAG, "Keyword detected: turn off lamp");
+                        lamp_led->TurnOff(0);  // 立即切换，快速响应
+                    } else {
+                        ESP_LOGD(TAG, "No lamp keywords found in message");
+                    }
+                } else {
+                    ESP_LOGW(TAG, "LampLed instance is null, keyword control disabled");
+                }
+
+                // 关键词本地触发“打招呼”动作（动作名可一行替换）
+                bool greeting_keyword = (lower_message.find("打招呼") != std::string::npos ||
+                                         lower_message.find("招呼") != std::string::npos);
+                if (greeting_keyword) {
+                    Schedule([]() {
+                        auto& servo_mgr = ServoManager::GetInstance();
+                        if (!servo_mgr.IsInitialized()) {
+                            ESP_LOGW(TAG, "Greeting action ignored: ServoManager not initialized");
+                            return;
+                        }
+                        bool ok = servo_mgr.PlayAction(kGreetingActionName);
+                        ESP_LOGI(TAG, "Greeting action trigger: action=%s ok=%d", kGreetingActionName, ok ? 1 : 0);
+                    });
+                }
+
+                // 关键词本地控制关节1/2/5（与MCP语义路由并行，作为快速兜底）
+
+                bool handled_joint = false;
+                // 关节1关键词：左转 / 右转（含“一点”变体）
+                bool left_turn = (lower_message.find("左转") != std::string::npos);
+                bool right_turn = (lower_message.find("右转") != std::string::npos);
+                bool has_a_little = (lower_message.find("一点") != std::string::npos ||
+                                     lower_message.find("一点点") != std::string::npos);
+
+                if (left_turn || right_turn) {
+                    int step_deg = has_a_little ? 10 : 20;
+                    int delta = left_turn ? -step_deg : step_deg;
+                    // Run servo motion asynchronously to avoid blocking STT/protocol callback.
+                    Schedule([delta]() {
+                        bool ok = LampMoveJoint1Relative(static_cast<float>(delta), 15.0f);
+                        ESP_LOGI(TAG, "Async keyword joint1 move: delta=%d ok=%d", delta, ok ? 1 : 0);
+                    });
+                    handled_joint = true;
+                } else {
+                    // 关节2关键词（台灯语境，低冲突词表）
+                    bool j2_up = (lower_message.find("照高一点") != std::string::npos ||
+                                  lower_message.find("灯光高一点") != std::string::npos ||
+                                  lower_message.find("把灯调高一点") != std::string::npos);
+                    bool j2_down = (lower_message.find("照低一点") != std::string::npos ||
+                                    lower_message.find("灯光低一点") != std::string::npos ||
+                                    lower_message.find("把灯调低一点") != std::string::npos);
+
+                    if (j2_up || j2_down) {
+                        int step_deg = 20;
+                        if (lower_message.find("一点") != std::string::npos ||
+                            lower_message.find("一点点") != std::string::npos ||
+                            lower_message.find("稍微") != std::string::npos ||
+                            lower_message.find("小幅") != std::string::npos) {
+                            step_deg = 10;
+                        } else if (lower_message.find("一些") != std::string::npos ||
+                                   lower_message.find("再高点") != std::string::npos ||
+                                   lower_message.find("再低点") != std::string::npos) {
+                            step_deg = 15;
+                        } else if (lower_message.find("大幅") != std::string::npos ||
+                                   lower_message.find("很多") != std::string::npos ||
+                                   lower_message.find("明显一点") != std::string::npos) {
+                            step_deg = 25;
+                        }
+
+                        int delta = j2_up ? step_deg : -step_deg;
+                        Schedule([delta]() {
+                            bool ok = LampMoveJoint2Relative(static_cast<float>(delta), 12.0f);
+                            ESP_LOGI(TAG, "Async keyword joint2 move: delta=%d ok=%d", delta, ok ? 1 : 0);
+                        });
+                        handled_joint = true;
+                    }
+                }
+
+                if (!handled_joint) {
+                    // 关节5关键词：抬头 / 低头（含“一点”变体）
+                    bool head_up = (lower_message.find("抬头") != std::string::npos);
+                    bool head_down = (lower_message.find("低头") != std::string::npos);
+                    if (head_up || head_down) {
+                        int step_deg = has_a_little ? 10 : 20;
+                        int delta = head_up ? step_deg : -step_deg;
+                        // Run servo motion asynchronously to avoid blocking STT/protocol callback.
+                        Schedule([delta]() {
+                            bool ok = LampMoveJoint5Relative(static_cast<float>(delta), 10.0f);
+                            ESP_LOGI(TAG, "Async keyword joint5 move: delta=%d ok=%d", delta, ok ? 1 : 0);
+                        });
+                        handled_joint = true;
+                    }
+                }
+
+                if (!handled_joint) {
+                    ESP_LOGD(TAG, "No local joint keywords found in message");
+                }
+                
+                Schedule([this, display, message]() {
                     display->SetChatMessage("user", message.c_str());
                 });
             }
@@ -495,10 +611,10 @@ void Application::Start() {
 
     SetDeviceState(kDeviceStateIdle);
 
-    has_server_time_ = ota.HasServerTime();
+   // has_server_time_ = ota.HasServerTime();
     if (protocol_started) {
-        std::string message = std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
-        display->ShowNotification(message.c_str());
+       // std::string message = std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
+       // display->ShowNotification(message.c_str());
         display->SetChatMessage("system", "");
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
@@ -506,6 +622,14 @@ void Application::Start() {
 
     // Print heap stats
     SystemInfo::PrintHeapStats();
+
+    // Initialize servo system (actions triggered via MCP tools by voice commands)
+    auto& servo_mgr = ServoManager::GetInstance();
+    if (servo_mgr.Init()) {
+        ESP_LOGI(TAG, "ServoManager ready, waiting for MCP commands.");
+    } else {
+        ESP_LOGW(TAG, "ServoManager init failed, servo actions disabled.");
+    }
 }
 
 void Application::OnClockTimer() {
@@ -520,6 +644,7 @@ void Application::OnClockTimer() {
         // SystemInfo::PrintTaskList();
         SystemInfo::PrintHeapStats();
     }
+
 }
 
 // Add a async task to MainLoop
@@ -658,7 +783,7 @@ void Application::SetDeviceState(DeviceState state) {
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
             break;
-        case kDeviceStateListening:
+        case kDeviceStateListening: {
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
@@ -670,8 +795,16 @@ void Application::SetDeviceState(DeviceState state) {
                 audio_service_.EnableWakeWordDetection(false);
             }
             break;
-        case kDeviceStateSpeaking:
+        }
+        case kDeviceStateSpeaking: {
             display->SetStatus(Lang::Strings::SPEAKING);
+
+            // Execute "chat" action when device starts speaking
+            auto& servo_mgr = ServoManager::GetInstance();
+            // NOTE(zexuan): Disabled to avoid interfering with servo angle tests (e.g. joint5 MoveToAngles).
+            // if (servo_mgr.IsInitialized() && !servo_mgr.IsPlaying()) {
+            //     servo_mgr.PlayAction("chat");
+            // }
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
@@ -684,6 +817,13 @@ void Application::SetDeviceState(DeviceState state) {
             }
             audio_service_.ResetDecoder();
             break;
+        }
+        case kDeviceStateStarting:
+        case kDeviceStateWifiConfiguring:
+        case kDeviceStateUpgrading:
+        case kDeviceStateActivating:
+        case kDeviceStateAudioTesting:
+        case kDeviceStateFatalError:
         default:
             // Do nothing
             break;
