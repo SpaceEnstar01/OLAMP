@@ -11,6 +11,7 @@
 #include <deque>
 #include <vector>
 #include <memory>
+#include <atomic>
 
 #include "protocol.h"
 #include "ota.h"
@@ -80,6 +81,7 @@ private:
     bool aborted_ = false;
     int clock_ticks_ = 0;
     TaskHandle_t check_new_version_task_handle_ = nullptr;
+    std::atomic<bool> suppress_next_tts_{false};
 
     void OnWakeWordDetected();
     void CheckNewVersion(Ota& ota);

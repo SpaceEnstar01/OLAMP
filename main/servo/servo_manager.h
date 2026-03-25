@@ -13,6 +13,7 @@
 
 #include "multi_servo.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 
 // Read current 5 joint angles (degrees) for the active lamp model.
 // Convenience wrapper around ServoManager::GetCurrentAngles.
@@ -56,6 +57,9 @@ public:
     // duration_ms: desired move duration (used to derive speed parameter)
     bool MoveJointToAngle(uint8_t joint_index, float target_angle_deg, int duration_ms);
 
+    // Read current angles once via UART task (on-demand only).
+    bool TryReadAnglesOnce(float out[5], int timeout_ms = 50);
+
     // Read current 5 joint angles (degrees) from servo bus.
     // Order: [base_yaw, base_pitch, elbow_pitch, wrist_roll, wrist_pitch].
     // Returns false if read fails.
@@ -85,6 +89,31 @@ private:
     bool last_commanded_valid_;
     bool no_feedback_mode_;
     SemaphoreHandle_t servo_bus_mutex_;
+    SemaphoreHandle_t servo_cache_mutex_;
+
+    enum class ServoUartCmdType : uint8_t {
+        kWriteJoint,
+        kReadOnce,
+    };
+
+    struct ServoUartCmd {
+        ServoUartCmdType type;
+        uint8_t joint_index;
+        float target_angle_deg;
+        int speed_reg;
+        TaskHandle_t requester_task;
+        uint32_t seq_id;
+    };
+
+    QueueHandle_t servo_uart_queue_;
+    TaskHandle_t servo_uart_task_;
+    uint32_t uart_seq_counter_;
+    uint32_t uart_last_done_seq_;
+    bool uart_last_ok_;
+    float uart_last_read_angles_[5];
+
+    static void ServoUartTask(void* param);
+    bool SubmitUartCmdAndWait(ServoUartCmd& cmd, int timeout_ms);
 
     // Background task for action playback
     static void PlaybackTask(void* param);

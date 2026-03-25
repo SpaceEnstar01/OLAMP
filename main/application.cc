@@ -21,6 +21,8 @@
 
 #define TAG "Application"
 static const char* kGreetingActionName = "say_hello";
+#define SERVO_READ_DEBUG_POLL 0
+#define SERVO_READ_DEBUG_INTERVAL_SEC 5
 
 
 static const char* const STATE_STRINGS[] = {
@@ -403,6 +405,16 @@ void Application::Start() {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
+                if (suppress_next_tts_.exchange(false)) {
+                    ESP_LOGI(TAG, "Suppress one server TTS due to locally handled joint command");
+                    Schedule([this]() {
+                        AbortSpeaking(kAbortReasonNone);
+                        if (device_state_ == kDeviceStateSpeaking) {
+                            SetDeviceState(kDeviceStateListening);
+                        }
+                    });
+                    return;
+                }
                 Schedule([this]() {
                     aborted_ = false;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
@@ -551,6 +563,10 @@ void Application::Start() {
 
                 if (!handled_joint) {
                     ESP_LOGD(TAG, "No local joint keywords found in message");
+                } else {
+                    // Local joint command already executed, suppress one server TTS response
+                    // to avoid contradictory "can't move" voice feedback.
+                    suppress_next_tts_.store(true);
                 }
                 
                 Schedule([this, display, message]() {
@@ -644,6 +660,22 @@ void Application::OnClockTimer() {
         // SystemInfo::PrintTaskList();
         SystemInfo::PrintHeapStats();
     }
+
+#if SERVO_READ_DEBUG_POLL
+    if (clock_ticks_ % SERVO_READ_DEBUG_INTERVAL_SEC == 0) {
+        auto& servo_mgr = ServoManager::GetInstance();
+        if (servo_mgr.IsInitialized() && !servo_mgr.IsPlaying()) {
+            float angles[5] = {0};
+            bool ok = servo_mgr.TryReadAnglesOnce(angles, 50);
+            if (ok) {
+                ESP_LOGI(TAG, "ServoReadDebug: ok=1 angles=[%.1f, %.1f, %.1f, %.1f, %.1f]",
+                         angles[0], angles[1], angles[2], angles[3], angles[4]);
+            } else {
+                ESP_LOGW(TAG, "ServoReadDebug: ok=0");
+            }
+        }
+    }
+#endif
 
 }
 

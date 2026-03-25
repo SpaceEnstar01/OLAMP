@@ -233,12 +233,13 @@ void InitializeServo() {
     
 public:
     CompactWifiBoardS3Cam() :
-        boot_button_(BOOT_BUTTON_GPIO) {
+        boot_button_(BOOT_BUTTON_GPIO),
+        servo_(nullptr) {
         InitializeSpi();
         InitializeLcdDisplay();  // LCD初始化（已禁用GPIO 21）
         InitializeButtons();
         InitializeCamera();
-        InitializeServo();
+        // Servo UART is initialized only by ServoManager in application startup.
         InitializeTools();  // 初始化台灯控制（使用GPIO 21）
 
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {

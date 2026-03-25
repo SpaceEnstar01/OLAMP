@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include <string.h>
 
 // Forward declaration for smooth multi-angle moves
@@ -24,7 +25,7 @@ static void ClampDuration(int& duration_ms) {
 // ============================================
 // Calibration data
 // ============================================
-#include "calibration/lamp05.h"
+#include "calibration/lamp0324.h"
 
 // ============================================
 // Action data - register all actions here
@@ -37,16 +38,15 @@ static void ClampDuration(int& duration_ms) {
 #include "actions/shaking_head.h"
 #include "actions/say_hello.h"
 
-// ============================================
-// Hardware configuration (adjust per board)
-// ============================================
-#define SERVO_UART_NUM      UART_NUM_2
-#define SERVO_TX_PIN        14
-#define SERVO_RX_PIN        3
-#define SERVO_BAUD_RATE     1000000   // STS servo default: 1Mbps
-
 static const char* TAG = "ServoManager";
-static const float kBootBaselineAngles[5] = {0.0f, 64.0f, 0.0f, 58.0f, -98.0f};
+static const char* UART_TEST_TAG = "ServoUartTest";
+static constexpr UBaseType_t kServoUartTaskPriority = 7;
+static constexpr int kServoUartQueueDepth = 16;
+// Use the same effective UART pins as current board config (bread-compact-wifi-s3cam).
+static constexpr uart_port_t SERVO_UART_NUM = UART_NUM_1;
+static constexpr int SERVO_TX_PIN = 14;
+static constexpr int SERVO_RX_PIN = 3;
+static constexpr int SERVO_BAUD_RATE = 1000000;
 
 // ============================================
 // Servo configs built from calibration data
@@ -103,14 +103,37 @@ ServoManager& ServoManager::GetInstance() {
 }
 
 ServoManager::ServoManager()
-    : is_playing_(false), last_commanded_valid_(false), no_feedback_mode_(true), servo_bus_mutex_(nullptr) {
+    : is_playing_(false),
+      last_commanded_valid_(false),
+      no_feedback_mode_(true),
+      servo_bus_mutex_(nullptr),
+      servo_cache_mutex_(nullptr),
+      servo_uart_queue_(nullptr),
+      servo_uart_task_(nullptr),
+      uart_seq_counter_(0),
+      uart_last_done_seq_(0),
+      uart_last_ok_(false) {
     for (int i = 0; i < 5; ++i) {
         last_commanded_angles_[i] = 0.0f;
+        uart_last_read_angles_[i] = 0.0f;
     }
     servo_bus_mutex_ = xSemaphoreCreateMutex();
+    servo_cache_mutex_ = xSemaphoreCreateMutex();
 }
 
 ServoManager::~ServoManager() {
+    if (servo_uart_task_ != nullptr) {
+        vTaskDelete(servo_uart_task_);
+        servo_uart_task_ = nullptr;
+    }
+    if (servo_uart_queue_ != nullptr) {
+        vQueueDelete(servo_uart_queue_);
+        servo_uart_queue_ = nullptr;
+    }
+    if (servo_cache_mutex_ != nullptr) {
+        vSemaphoreDelete(servo_cache_mutex_);
+        servo_cache_mutex_ = nullptr;
+    }
     if (servo_bus_mutex_ != nullptr) {
         vSemaphoreDelete(servo_bus_mutex_);
         servo_bus_mutex_ = nullptr;
@@ -125,8 +148,8 @@ bool ServoManager::Init() {
     ESP_LOGI(TAG, "  Calibration: %s", CALIBRATION_LAMP_ID);
     ESP_LOGI(TAG, "========================================");
 
-    if (servo_bus_mutex_ == nullptr) {
-        ESP_LOGE(TAG, "Servo bus mutex create failed");
+    if (servo_bus_mutex_ == nullptr || servo_cache_mutex_ == nullptr) {
+        ESP_LOGE(TAG, "Servo mutex create failed");
         return false;
     }
 
@@ -154,16 +177,43 @@ bool ServoManager::Init() {
     ESP_LOGI(TAG, "Enabling torque...");
     multi_servo_.EnableTorqueAll(true);
 
-    // No-feedback mode baseline:
-    // startup cache is fixed to known physical pose to avoid ReadPos dependency.
-    for (int i = 0; i < 5; ++i) {
-        last_commanded_angles_[i] = kBootBaselineAngles[i];
+    if (servo_uart_queue_ == nullptr) {
+        servo_uart_queue_ = xQueueCreate(kServoUartQueueDepth, sizeof(ServoUartCmd));
     }
-    last_commanded_valid_ = true;
-    ESP_LOGI(TAG, "No-feedback mode baseline: [%.1f, %.1f, %.1f, %.1f, %.1f]",
-             last_commanded_angles_[0], last_commanded_angles_[1], last_commanded_angles_[2],
-             last_commanded_angles_[3], last_commanded_angles_[4]);
+    if (servo_uart_queue_ == nullptr) {
+        xSemaphoreGive(servo_bus_mutex_);
+        ESP_LOGE(TAG, "Create servo UART queue failed");
+        return false;
+    }
+    if (servo_uart_task_ == nullptr) {
+        BaseType_t t = xTaskCreatePinnedToCore(
+            ServoUartTask,
+            "servo_uart_comm",
+            4096,
+            this,
+            kServoUartTaskPriority,
+            &servo_uart_task_,
+            1
+        );
+        if (t != pdPASS) {
+            xSemaphoreGive(servo_bus_mutex_);
+            ESP_LOGE(TAG, "Create servo UART task failed");
+            return false;
+        }
+        ESP_LOGI(UART_TEST_TAG, "ServoUartTask started, prio=%u core=1", (unsigned)kServoUartTaskPriority);
+    }
+
     xSemaphoreGive(servo_bus_mutex_);
+
+    // Startup baseline from measured angles (single read), not fixed constants.
+    float measured_angles[5] = {0};
+    if (!TryReadAnglesOnce(measured_angles, 200)) {
+        ESP_LOGE(TAG, "Init failed: unable to read startup angles for cache baseline");
+        return false;
+    }
+    ESP_LOGI(TAG, "Startup measured baseline: [%.1f, %.1f, %.1f, %.1f, %.1f]",
+             measured_angles[0], measured_angles[1], measured_angles[2],
+             measured_angles[3], measured_angles[4]);
 
     ESP_LOGI(TAG, "Servo system ready. %d actions registered.", kActionCount);
     return true;
@@ -278,12 +328,16 @@ bool ServoManager::GetCurrentAngles(float out[5]) {
         ESP_LOGE(TAG, "GetCurrentAngles: servo bus mutex is null");
         return false;
     }
+    if (servo_cache_mutex_ == nullptr) {
+        ESP_LOGE(TAG, "GetCurrentAngles: servo cache mutex is null");
+        return false;
+    }
 
     // In no-feedback mode we report cached commanded angles as current angles.
     if (no_feedback_mode_) {
-        xSemaphoreTake(servo_bus_mutex_, portMAX_DELAY);
+        xSemaphoreTake(servo_cache_mutex_, portMAX_DELAY);
         if (!last_commanded_valid_) {
-            xSemaphoreGive(servo_bus_mutex_);
+            xSemaphoreGive(servo_cache_mutex_);
             ESP_LOGW(TAG, "GetCurrentAngles(no-feedback): cache unavailable");
             for (int i = 0; i < 5; ++i) out[i] = 0.0f;
             return false;
@@ -291,25 +345,10 @@ bool ServoManager::GetCurrentAngles(float out[5]) {
         for (int i = 0; i < 5; ++i) {
             out[i] = last_commanded_angles_[i];
         }
-        xSemaphoreGive(servo_bus_mutex_);
+        xSemaphoreGive(servo_cache_mutex_);
         return true;
     }
-
-    xSemaphoreTake(servo_bus_mutex_, portMAX_DELAY);
-    bool ok = multi_servo_.ReadCurrentAngles(out);
-    if (ok) {
-        for (int i = 0; i < 5; ++i) {
-            last_commanded_angles_[i] = out[i];
-        }
-        last_commanded_valid_ = true;
-    }
-    xSemaphoreGive(servo_bus_mutex_);
-
-    if (!ok) {
-        ESP_LOGW(TAG, "GetCurrentAngles: ReadCurrentAngles failed");
-        return false;
-    }
-    return true;
+    return TryReadAnglesOnce(out, 50);
 }
 
 bool ServoManager::GetAnglesForMotion(float out[5]) {
@@ -317,27 +356,27 @@ bool ServoManager::GetAnglesForMotion(float out[5]) {
         ESP_LOGE(TAG, "GetAnglesForMotion: servo system not initialized");
         return false;
     }
-    if (servo_bus_mutex_ == nullptr) {
-        ESP_LOGE(TAG, "GetAnglesForMotion: servo bus mutex is null");
+    if (servo_cache_mutex_ == nullptr) {
+        ESP_LOGE(TAG, "GetAnglesForMotion: servo cache mutex is null");
         return false;
     }
 
-    xSemaphoreTake(servo_bus_mutex_, portMAX_DELAY);
+    xSemaphoreTake(servo_cache_mutex_, portMAX_DELAY);
     if (last_commanded_valid_) {
         for (int i = 0; i < 5; ++i) {
             out[i] = last_commanded_angles_[i];
         }
-        xSemaphoreGive(servo_bus_mutex_);
+        xSemaphoreGive(servo_cache_mutex_);
         return true;
     }
-    xSemaphoreGive(servo_bus_mutex_);
+    xSemaphoreGive(servo_cache_mutex_);
 
     if (no_feedback_mode_) {
         ESP_LOGW(TAG, "GetAnglesForMotion(no-feedback): cache unavailable");
         return false;
     }
 
-    if (GetCurrentAngles(out)) {
+    if (TryReadAnglesOnce(out, 50)) {
         return true;
     }
 
@@ -346,27 +385,27 @@ bool ServoManager::GetAnglesForMotion(float out[5]) {
 }
 
 void ServoManager::UpdateLastCommandedAngles(const float angles[5]) {
-    if (angles == nullptr || servo_bus_mutex_ == nullptr) {
+    if (angles == nullptr || servo_cache_mutex_ == nullptr) {
         return;
     }
-    xSemaphoreTake(servo_bus_mutex_, portMAX_DELAY);
+    xSemaphoreTake(servo_cache_mutex_, portMAX_DELAY);
     for (int i = 0; i < 5; ++i) {
         last_commanded_angles_[i] = angles[i];
     }
     last_commanded_valid_ = true;
-    xSemaphoreGive(servo_bus_mutex_);
+    xSemaphoreGive(servo_cache_mutex_);
 }
 
 void ServoManager::SetInitialAngles(const float angles[5]) {
-    if (angles == nullptr || servo_bus_mutex_ == nullptr) {
+    if (angles == nullptr || servo_cache_mutex_ == nullptr) {
         return;
     }
-    xSemaphoreTake(servo_bus_mutex_, portMAX_DELAY);
+    xSemaphoreTake(servo_cache_mutex_, portMAX_DELAY);
     for (int i = 0; i < 5; ++i) {
         last_commanded_angles_[i] = angles[i];
     }
     last_commanded_valid_ = true;
-    xSemaphoreGive(servo_bus_mutex_);
+    xSemaphoreGive(servo_cache_mutex_);
 }
 
 bool ServoManager::MoveToAngles(const float angles[5], int duration_ms) {
@@ -434,8 +473,8 @@ bool ServoManager::MoveJointToAngle(uint8_t joint_index, float target_angle_deg,
         ESP_LOGE(TAG, "MoveJointToAngle: invalid joint_index=%u", joint_index);
         return false;
     }
-    if (servo_bus_mutex_ == nullptr) {
-        ESP_LOGE(TAG, "MoveJointToAngle: servo bus mutex is null");
+    if (servo_uart_queue_ == nullptr || servo_cache_mutex_ == nullptr) {
+        ESP_LOGE(TAG, "MoveJointToAngle: servo UART infrastructure unavailable");
         return false;
     }
 
@@ -461,25 +500,139 @@ bool ServoManager::MoveJointToAngle(uint8_t joint_index, float target_angle_deg,
     if (speed_reg < 80) speed_reg = 80;
     if (speed_reg > 800) speed_reg = 800;
 
-    xSemaphoreTake(servo_bus_mutex_, portMAX_DELAY);
-    bool torque_ok = multi_servo_.EnableTorqueAll(true);
-    bool ok = multi_servo_.MoveTo(joint_index, target_angle_deg, speed_reg, 0);
-    xSemaphoreGive(servo_bus_mutex_);
+    ServoUartCmd cmd{};
+    cmd.type = ServoUartCmdType::kWriteJoint;
+    cmd.joint_index = joint_index;
+    cmd.target_angle_deg = target_angle_deg;
+    cmd.speed_reg = speed_reg;
+    bool ok = SubmitUartCmdAndWait(cmd, 400);
 
     ESP_LOGI(TAG,
-             "MoveJointToAngle: joint=%u current=%.1f target=%.1f duration_ms=%d speed_reg=%d torque_ok=%d ok=%d",
-             joint_index + 1, current_deg, target_angle_deg, duration_ms, speed_reg,
-             torque_ok ? 1 : 0, ok ? 1 : 0);
+             "MoveJointToAngle: joint=%u current=%.1f target=%.1f duration_ms=%d speed_reg=%d ok=%d",
+             joint_index + 1, current_deg, target_angle_deg, duration_ms, speed_reg, ok ? 1 : 0);
 
     if (!ok) {
         return false;
     }
-
-    float updated[5];
-    for (int i = 0; i < 5; ++i) updated[i] = current[i];
-    updated[joint_index] = target_angle_deg;
-    UpdateLastCommandedAngles(updated);
     return true;
+}
+
+bool ServoManager::TryReadAnglesOnce(float out[5], int timeout_ms) {
+    if (!multi_servo_.IsInitialized() || servo_uart_queue_ == nullptr || servo_cache_mutex_ == nullptr) {
+        return false;
+    }
+    if (timeout_ms < 10) timeout_ms = 10;
+
+    ServoUartCmd cmd{};
+    cmd.type = ServoUartCmdType::kReadOnce;
+    bool ok = SubmitUartCmdAndWait(cmd, timeout_ms);
+    if (!ok) {
+        return false;
+    }
+
+    xSemaphoreTake(servo_cache_mutex_, portMAX_DELAY);
+    for (int i = 0; i < 5; ++i) {
+        out[i] = uart_last_read_angles_[i];
+    }
+    xSemaphoreGive(servo_cache_mutex_);
+    return true;
+}
+
+bool ServoManager::SubmitUartCmdAndWait(ServoUartCmd& cmd, int timeout_ms) {
+    if (servo_uart_queue_ == nullptr || servo_cache_mutex_ == nullptr) {
+        return false;
+    }
+    if (timeout_ms < 10) timeout_ms = 10;
+
+    xSemaphoreTake(servo_cache_mutex_, portMAX_DELAY);
+    cmd.requester_task = xTaskGetCurrentTaskHandle();
+    cmd.seq_id = ++uart_seq_counter_;
+    xSemaphoreGive(servo_cache_mutex_);
+
+    BaseType_t enq = xQueueSend(servo_uart_queue_, &cmd, pdMS_TO_TICKS(20));
+    if (enq != pdTRUE) {
+        ESP_LOGW(UART_TEST_TAG, "queue full, drop cmd type=%d", static_cast<int>(cmd.type));
+        return false;
+    }
+
+    uint32_t n = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(timeout_ms));
+    if (n == 0) {
+        ESP_LOGW(UART_TEST_TAG, "wait timeout type=%d seq=%u", static_cast<int>(cmd.type), (unsigned)cmd.seq_id);
+        return false;
+    }
+
+    xSemaphoreTake(servo_cache_mutex_, portMAX_DELAY);
+    bool seq_match = (uart_last_done_seq_ == cmd.seq_id);
+    bool ok = uart_last_ok_;
+    xSemaphoreGive(servo_cache_mutex_);
+    return seq_match && ok;
+}
+
+void ServoManager::ServoUartTask(void* param) {
+    auto* mgr = static_cast<ServoManager*>(param);
+    ServoUartCmd cmd{};
+    for (;;) {
+        if (xQueueReceive(mgr->servo_uart_queue_, &cmd, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        bool ok = false;
+        if (cmd.type == ServoUartCmdType::kWriteJoint) {
+            xSemaphoreTake(mgr->servo_bus_mutex_, portMAX_DELAY);
+            bool torque_ok = mgr->multi_servo_.EnableTorqueAll(true);
+            bool sent_ok = mgr->multi_servo_.MoveTo(cmd.joint_index, cmd.target_angle_deg, cmd.speed_reg, 0);
+            xSemaphoreGive(mgr->servo_bus_mutex_);
+            if (!torque_ok) {
+                ESP_LOGW(UART_TEST_TAG, "UART_CMD write: torque enable not acknowledged, continue");
+            }
+            // Write command accepted/sent is enough for motion success in this mode.
+            ok = sent_ok;
+
+            if (ok && mgr->servo_cache_mutex_ != nullptr) {
+                xSemaphoreTake(mgr->servo_cache_mutex_, portMAX_DELAY);
+                if (!mgr->last_commanded_valid_) {
+                    for (int i = 0; i < 5; ++i) mgr->last_commanded_angles_[i] = 0.0f;
+                }
+                mgr->last_commanded_angles_[cmd.joint_index] = cmd.target_angle_deg;
+                mgr->last_commanded_valid_ = true;
+                ESP_LOGI(UART_TEST_TAG, "Cached angles: [%.1f, %.1f, %.1f, %.1f, %.1f]",
+                         mgr->last_commanded_angles_[0], mgr->last_commanded_angles_[1],
+                         mgr->last_commanded_angles_[2], mgr->last_commanded_angles_[3],
+                         mgr->last_commanded_angles_[4]);
+                xSemaphoreGive(mgr->servo_cache_mutex_);
+            }
+            ESP_LOGI(UART_TEST_TAG,
+                     "UART_CMD write joint=%u target=%.1f speed=%d seq=%u ok=%d",
+                     cmd.joint_index + 1, cmd.target_angle_deg, cmd.speed_reg,
+                     (unsigned)cmd.seq_id, ok ? 1 : 0);
+        } else if (cmd.type == ServoUartCmdType::kReadOnce) {
+            float read_buf[5] = {0};
+            xSemaphoreTake(mgr->servo_bus_mutex_, portMAX_DELAY);
+            ok = mgr->multi_servo_.ReadCurrentAngles(read_buf);
+            xSemaphoreGive(mgr->servo_bus_mutex_);
+
+            if (ok && mgr->servo_cache_mutex_ != nullptr) {
+                xSemaphoreTake(mgr->servo_cache_mutex_, portMAX_DELAY);
+                for (int i = 0; i < 5; ++i) {
+                    mgr->uart_last_read_angles_[i] = read_buf[i];
+                    mgr->last_commanded_angles_[i] = read_buf[i];
+                }
+                mgr->last_commanded_valid_ = true;
+                xSemaphoreGive(mgr->servo_cache_mutex_);
+            }
+            ESP_LOGI(UART_TEST_TAG, "UART_CMD read_once seq=%u ok=%d", (unsigned)cmd.seq_id, ok ? 1 : 0);
+        }
+
+        if (mgr->servo_cache_mutex_ != nullptr) {
+            xSemaphoreTake(mgr->servo_cache_mutex_, portMAX_DELAY);
+            mgr->uart_last_done_seq_ = cmd.seq_id;
+            mgr->uart_last_ok_ = ok;
+            xSemaphoreGive(mgr->servo_cache_mutex_);
+        }
+        if (cmd.requester_task != nullptr) {
+            xTaskNotifyGive(cmd.requester_task);
+        }
+    }
 }
 
 

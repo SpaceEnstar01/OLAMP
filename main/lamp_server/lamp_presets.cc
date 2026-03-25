@@ -2,39 +2,39 @@
 
 #include <string.h>
 
-#include "servo/calibration/lamp05.h"
+#include "servo/calibration/lamp0324.h"
 
-// For now we only support lamp05 at compile time.
+// For now we only support lamp0324 at compile time.
 // In future, additional lampXX.h headers can be added here and
 // dispatched by CALIBRATION_LAMP_ID.
 
-static LampPreset g_lamp05_presets[kLamp05PresetCount];
-static bool g_lamp05_initialized = false;
+static LampPreset g_lamp_presets[kLamp0324PresetCount];
+static bool g_lamp_presets_initialized = false;
 
-static void EnsureLamp05PresetsInitialized() {
-    if (g_lamp05_initialized) {
+static void EnsureLampPresetsInitialized() {
+    if (g_lamp_presets_initialized) {
         return;
     }
 
-    for (int i = 0; i < kLamp05PresetCount; ++i) {
-        g_lamp05_presets[i].model_id = CALIBRATION_LAMP_ID;
-        g_lamp05_presets[i].name = kLamp05Presets[i].name;
+    for (int i = 0; i < kLamp0324PresetCount; ++i) {
+        g_lamp_presets[i].model_id = CALIBRATION_LAMP_ID;
+        g_lamp_presets[i].name = kLamp0324Presets[i].name;
         for (int j = 0; j < 5; ++j) {
-            g_lamp05_presets[i].angles[j] = kLamp05Presets[i].angles[j];
+            g_lamp_presets[i].angles[j] = kLamp0324Presets[i].angles[j];
         }
     }
 
-    g_lamp05_initialized = true;
+    g_lamp_presets_initialized = true;
 }
 
 bool GetLampPresets(const LampPreset*& presets, int& count) {
-    // Currently only lamp05 is compiled in.
+    // Currently only lamp0324 is compiled in.
     (void)presets;
     (void)count;
 
-    EnsureLamp05PresetsInitialized();
-    presets = g_lamp05_presets;
-    count = kLamp05PresetCount;
+    EnsureLampPresetsInitialized();
+    presets = g_lamp_presets;
+    count = kLamp0324PresetCount;
     return true;
 }
 

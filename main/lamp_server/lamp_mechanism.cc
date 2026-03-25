@@ -2,14 +2,14 @@
 
 #include <string.h>
 
-#include "servo/calibration/lamp05.h"
+#include "servo/calibration/lamp0324.h"
 
 // NOTE:
 // This file provides a semantic description of the current lamp model
-// using the calibration data (lamp05.h, lamp03.h, etc.).
+// using the calibration data (lamp0324.h, lamp03.h, etc.).
 //
 // Angle ranges are derived from the same register ranges that MultiServo
-// uses, so when you switch calibration header (lamp05 -> lamp03), the
+// uses, so when you switch calibration header (lamp0324 -> lamp03), the
 // semantic description will automatically follow.
 
 static LampJointInfo g_joints[5];
